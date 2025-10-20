@@ -42,15 +42,16 @@ EVAL_BATCH_SIZE = 64
 LEARNING_RATE = 5e-5
 WARMUP_STEPS = 10000
 LOGGING_STEPS = 2000
-SAVE_STEPS = 10000  # Lưu mỗi 10k steps
-EVAL_STEPS = 10000   # Eval mỗi 5k steps
+SAVE_STEPS = 20000  # Lưu mỗi 10k steps
+EVAL_STEPS = 2000   # Eval mỗi 5k steps
 
 # Streaming settings
 SHUFFLE_BUFFER = 50000      # Buffer để shuffle (tăng nếu RAM đủ)
 
 # DataLoader optimization - TĂNG TỐC LOAD DATA
-NUM_WORKERS = min(8, multiprocessing.cpu_count() - 1)  # Số workers để load data song song
-PREFETCH_FACTOR = 4         # Số batches mỗi worker prefetch trước
+# Với streaming dataset (1 shard), set NUM_WORKERS = 0 hoặc 1 để tránh warning
+NUM_WORKERS = 0  # Streaming dataset chỉ có 1 shard, không cần nhiều workers
+PREFETCH_FACTOR = 2         # Số batches mỗi worker prefetch trước
 TOKENIZATION_BATCH_SIZE = 1000  # Batch size cho tokenization (lớn hơn = nhanh hơn)
 
 # GPU settings
@@ -224,8 +225,22 @@ if __name__ == "__main__":
     print("\n[3/6] Tải tokenizer và model...")
     start_time = time.time()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+    # Kiểm tra xem có checkpoint cũ không để load model weights
+    latest_checkpoint = find_latest_checkpoint(OUTPUT_DIR)
+    
+    if latest_checkpoint:
+        step_number = int(latest_checkpoint.split("-")[-1])
+        print(f"  ⚡ Tìm thấy checkpoint: {latest_checkpoint}")
+        print(f"  ⚡ Step: {step_number:,}")
+        print(f"  ⚡ Load MODEL WEIGHTS từ checkpoint (train từ đầu, không resume)")
+        
+        # Load model weights từ checkpoint
+        tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
+        model = AutoModelForSeq2SeqLM.from_pretrained(latest_checkpoint)
+    else:
+        print(f"  → Load pretrained model: {MODEL_NAME}")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
     if device == "cuda":
         model = model.to(device)
@@ -314,26 +329,11 @@ if __name__ == "__main__":
     print("  ✓ Training arguments đã được thiết lập")
     
     # ========================================================================
-    # KIỂM TRA CHECKPOINT ĐỂ RESUME
-    # ========================================================================
-    
-    resume_from_checkpoint = None
-    latest_checkpoint = find_latest_checkpoint(OUTPUT_DIR)
-    
-    if latest_checkpoint:
-        step_number = int(latest_checkpoint.split("-")[-1])
-        print(f"\n⚠️  Tìm thấy checkpoint cũ: {latest_checkpoint}")
-        print(f"   Step: {step_number:,}")
-        print(f"   Sẽ RESUME training từ checkpoint này!")
-        resume_from_checkpoint = latest_checkpoint
-    else:
-        print(f"\n✓ Không tìm thấy checkpoint cũ, sẽ bắt đầu training từ đầu")
-    
-    # ========================================================================
     # TRAINING
     # ========================================================================
 
     print("\n[6/6] Bắt đầu training...")
+    print(f"  - Train từ đầu (step 0) với model weights đã load")
     print(f"  - Ước tính thời gian: ~{max_steps / (LOGGING_STEPS * 10):.1f} giờ")
     print("-" * 80)
     
@@ -348,8 +348,8 @@ if __name__ == "__main__":
         data_collator=data_collator,
     )
     
-    # Train (resume từ checkpoint nếu có)
-    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    # Train từ đầu (không resume, chỉ dùng model weights đã load)
+    train_result = trainer.train()
     
     training_time = time.time() - training_start_time
     print("-" * 80)
