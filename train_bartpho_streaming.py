@@ -49,9 +49,9 @@ EVAL_STEPS = 2000   # Eval mỗi 5k steps
 SHUFFLE_BUFFER = 50000      # Buffer để shuffle (tăng nếu RAM đủ)
 
 # DataLoader optimization - TĂNG TỐC LOAD DATA
-# Với streaming dataset (1 shard), set NUM_WORKERS = 0 hoặc 1 để tránh warning
-NUM_WORKERS = 0  # Streaming dataset chỉ có 1 shard, không cần nhiều workers
-PREFETCH_FACTOR = 2         # Số batches mỗi worker prefetch trước
+# Với streaming dataset (1 shard), set NUM_WORKERS = 1 để tránh warning
+NUM_WORKERS = 1  # Streaming dataset chỉ có 1 shard, set 1 worker để dùng prefetch
+PREFETCH_FACTOR = 2  # Số batches mỗi worker prefetch trước (cần NUM_WORKERS > 0)
 TOKENIZATION_BATCH_SIZE = 1000  # Batch size cho tokenization (lớn hơn = nhanh hơn)
 
 # GPU settings
