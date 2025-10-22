@@ -333,20 +333,21 @@ if __name__ == "__main__":
     print("\n[3/6] Tải tokenizer và model...")
     start_time = time.time()
 
-    # Kiểm tra xem có checkpoint cũ không để load model weights
+    # Kiểm tra xem có checkpoint để resume
     latest_checkpoint = find_latest_checkpoint(OUTPUT_DIR)
     
     if latest_checkpoint:
         step_number = int(latest_checkpoint.split("-")[-1])
         print(f"  ⚡ Tìm thấy checkpoint: {latest_checkpoint}")
         print(f"  ⚡ Step: {step_number:,}")
-        print(f"  ⚡ Load MODEL WEIGHTS từ checkpoint (train từ đầu, không resume)")
+        print(f"  ⚡ Sẽ RESUME training từ checkpoint này")
         
-        # Load model weights từ checkpoint
+        # Load tokenizer từ checkpoint để đảm bảo consistency
         tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
+        # Load model từ checkpoint
         model = AutoModelForSeq2SeqLM.from_pretrained(latest_checkpoint)
     else:
-        print(f"  → Load pretrained model: {MODEL_NAME}")
+        print(f"  → Không tìm thấy checkpoint, load pretrained model: {MODEL_NAME}")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
@@ -447,7 +448,11 @@ if __name__ == "__main__":
     # ========================================================================
 
     print("\n[6/6] Bắt đầu training...")
-    print(f"  - Train từ đầu (step 0) với model weights đã load")
+    if latest_checkpoint:
+        print(f"  - RESUME training từ checkpoint: {latest_checkpoint}")
+        print(f"  - Tiếp tục từ step {step_number:,}")
+    else:
+        print(f"  - Bắt đầu training từ đầu (step 0)")
     print(f"  - Ước tính thời gian: ~{max_steps / (LOGGING_STEPS * 10):.1f} giờ")
     print("-" * 80)
     
@@ -463,8 +468,8 @@ if __name__ == "__main__":
         compute_metrics=lambda eval_preds: compute_metrics(eval_preds, tokenizer),
     )
     
-    # Train từ đầu (không resume, chỉ dùng model weights đã load)
-    train_result = trainer.train()
+    # Resume từ checkpoint nếu có, nếu không thì train từ đầu
+    train_result = trainer.train(resume_from_checkpoint=latest_checkpoint)
     
     training_time = time.time() - training_start_time
     print("-" * 80)
