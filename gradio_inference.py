@@ -10,6 +10,7 @@ Gradio UI sẽ mở tại http://localhost:7860
 
 import os
 import glob
+import re
 import torch
 import gradio as gr
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -93,24 +94,54 @@ print("=" * 80)
 # HÀM SỬA LỖI CHÍNH TẢ
 # ============================================================================
 
-def correct_spelling(text, num_beams=DEFAULT_NUM_BEAMS, max_length=MAX_LENGTH):
+def split_sentences(text):
     """
-    Sửa lỗi chính tả cho văn bản đầu vào
+    Cắt văn bản thành các câu dựa trên dấu chấm (.) và dấu chấm hỏi (?)
+    Giữ lại dấu câu ở cuối mỗi câu
     
     Args:
-        text (str): Văn bản có lỗi chính tả
+        text (str): Văn bản đầu vào
+    
+    Returns:
+        list: Danh sách các câu
+    """
+    # Tách theo dấu chấm và dấu chấm hỏi, nhưng giữ lại dấu
+    # Pattern: split sau dấu . hoặc ? (và khoảng trắng nếu có)
+    sentences = re.split(r'([.?])\s*', text)
+    
+    # Ghép lại dấu câu với câu tương ứng
+    result = []
+    for i in range(0, len(sentences) - 1, 2):
+        if sentences[i].strip():  # Bỏ qua câu rỗng
+            sentence = sentences[i]
+            if i + 1 < len(sentences):
+                sentence += sentences[i + 1]  # Thêm dấu câu
+            result.append(sentence.strip())
+    
+    # Xử lý câu cuối nếu không có dấu câu
+    if len(sentences) % 2 == 1 and sentences[-1].strip():
+        result.append(sentences[-1].strip())
+    
+    return result
+
+def correct_single_sentence(sentence, num_beams=DEFAULT_NUM_BEAMS, max_length=MAX_LENGTH):
+    """
+    Sửa lỗi chính tả cho một câu đơn
+    
+    Args:
+        sentence (str): Câu có lỗi chính tả
         num_beams (int): Số beams cho beam search
         max_length (int): Độ dài tối đa của output
     
     Returns:
-        str: Văn bản đã được sửa lỗi
+        str: Câu đã được sửa lỗi
     """
-    if not text or not text.strip():
+    if not sentence or not sentence.strip():
         return ""
     
     # Tokenize input
     inputs = tokenizer(
-        text,
+        sentence,
         max_length=max_length,
         truncation=True,
         padding=True,
@@ -134,6 +165,36 @@ def correct_spelling(text, num_beams=DEFAULT_NUM_BEAMS, max_length=MAX_LENGTH):
     corrected_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     
     return corrected_text
+
+def correct_spelling(text, num_beams=DEFAULT_NUM_BEAMS, max_length=MAX_LENGTH):
+    """
+    Sửa lỗi chính tả cho văn bản đầu vào
+    Cắt văn bản thành các câu, sửa từng câu, rồi merge lại
+    
+    Args:
+        text (str): Văn bản có lỗi chính tả
+        num_beams (int): Số beams cho beam search
+        max_length (int): Độ dài tối đa của output
+    
+    Returns:
+        str: Văn bản đã được sửa lỗi
+    """
+    if not text or not text.strip():
+        return ""
+    
+    # Cắt văn bản thành các câu
+    sentences = split_sentences(text)
+    
+    # Sửa từng câu
+    corrected_sentences = []
+    for sentence in sentences:
+        corrected = correct_single_sentence(sentence, num_beams, max_length)
+        corrected_sentences.append(corrected)
+    
+    # Merge các câu lại với khoảng trắng
+    result = " ".join(corrected_sentences)
+    
+    return result
 
 # ============================================================================
 # GRADIO INTERFACE
