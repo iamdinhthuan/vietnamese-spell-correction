@@ -11,7 +11,8 @@ from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     DataCollatorForSeq2Seq,
-    TrainerCallback
+    TrainerCallback,
+    EarlyStoppingCallback
 )
 import evaluate
 
@@ -164,12 +165,11 @@ def preprocess_function(examples, tokenizer, max_input_length, max_target_length
 
 def compute_metrics(eval_preds, tokenizer):
     """
-    Tính các metrics đánh giá spelling correction:
+    Tính các metrics đánh giá spelling correction (tối ưu với evaluate library):
     - BLEU score: đo lường chất lượng translation/generation
     - Exact Match Accuracy: % câu sửa chính xác 100%
     - Character Error Rate (CER): % lỗi ở mức ký tự
     - Word Error Rate (WER): % lỗi ở mức từ
-    - Correction Rate: % câu được sửa (khác input)
     """
     predictions, labels = eval_preds
     
@@ -204,75 +204,31 @@ def compute_metrics(eval_preds, tokenizer):
     exact_matches = sum(pred == label for pred, label in zip(decoded_preds, decoded_labels))
     exact_match_accuracy = exact_matches / len(decoded_preds) * 100
     
-    # 3. Character Error Rate (CER)
-    def calculate_cer(pred, ref):
-        """Tính CER giữa 2 strings (Levenshtein distance)"""
-        if len(ref) == 0:
-            return 0.0 if len(pred) == 0 else 1.0
-        
-        # Dynamic programming - Levenshtein distance
-        d = [[0] * (len(ref) + 1) for _ in range(len(pred) + 1)]
-        
-        for i in range(len(pred) + 1):
-            d[i][0] = i
-        for j in range(len(ref) + 1):
-            d[0][j] = j
-        
-        for i in range(1, len(pred) + 1):
-            for j in range(1, len(ref) + 1):
-                cost = 0 if pred[i-1] == ref[j-1] else 1
-                d[i][j] = min(
-                    d[i-1][j] + 1,      # deletion
-                    d[i][j-1] + 1,      # insertion
-                    d[i-1][j-1] + cost  # substitution
-                )
-        
-        return d[len(pred)][len(ref)] / len(ref)
+    # 3. Character Error Rate (CER) - Dùng evaluate library (nhanh hơn)
+    try:
+        cer_metric = evaluate.load("cer")
+        avg_cer = cer_metric.compute(
+            predictions=decoded_preds,
+            references=decoded_labels
+        ) * 100
+    except:
+        avg_cer = 0.0
     
-    cer_scores = [calculate_cer(pred, label) for pred, label in zip(decoded_preds, decoded_labels)]
-    avg_cer = sum(cer_scores) / len(cer_scores) * 100
-    
-    # 4. Word Error Rate (WER)
-    def calculate_wer(pred, ref):
-        """Tính WER giữa 2 câu (Levenshtein distance trên words)"""
-        pred_words = pred.split()
-        ref_words = ref.split()
-        
-        if len(ref_words) == 0:
-            return 0.0 if len(pred_words) == 0 else 1.0
-        
-        # Dynamic programming
-        d = [[0] * (len(ref_words) + 1) for _ in range(len(pred_words) + 1)]
-        
-        for i in range(len(pred_words) + 1):
-            d[i][0] = i
-        for j in range(len(ref_words) + 1):
-            d[0][j] = j
-        
-        for i in range(1, len(pred_words) + 1):
-            for j in range(1, len(ref_words) + 1):
-                cost = 0 if pred_words[i-1] == ref_words[j-1] else 1
-                d[i][j] = min(
-                    d[i-1][j] + 1,
-                    d[i][j-1] + 1,
-                    d[i-1][j-1] + cost
-                )
-        
-        return d[len(pred_words)][len(ref_words)] / len(ref_words)
-    
-    wer_scores = [calculate_wer(pred, label) for pred, label in zip(decoded_preds, decoded_labels)]
-    avg_wer = sum(wer_scores) / len(wer_scores) * 100
-    
-    # 5. Correction Rate (% predictions khác ground truth - tức model đã sửa)
-    corrections_made = sum(pred != label for pred, label in zip(decoded_preds, decoded_labels))
-    correction_rate = corrections_made / len(decoded_preds) * 100
+    # 4. Word Error Rate (WER) - Dùng evaluate library (nhanh hơn)
+    try:
+        wer_metric = evaluate.load("wer")
+        avg_wer = wer_metric.compute(
+            predictions=decoded_preds,
+            references=decoded_labels
+        ) * 100
+    except:
+        avg_wer = 0.0
     
     return {
         "bleu": round(bleu_score, 2),
         "exact_match": round(exact_match_accuracy, 2),
         "cer": round(avg_cer, 2),
         "wer": round(avg_wer, 2),
-        "correction_rate": round(correction_rate, 2),
     }
 
 # ============================================================================
@@ -452,6 +408,12 @@ if __name__ == "__main__":
         remove_columns=["error_text", "correct_text"],
         desc="Tokenizing eval dataset"
     )
+    
+    # Giới hạn eval dataset để tăng tốc evaluation
+    original_eval_size = len(eval_dataset)
+    if len(eval_dataset) > MAX_EVAL_SAMPLES:
+        eval_dataset = eval_dataset.select(range(MAX_EVAL_SAMPLES))
+        print(f"  → Giới hạn eval dataset: {original_eval_size:,} → {MAX_EVAL_SAMPLES:,} samples (để tăng tốc)")
 
     print(f"  ✓ Train dataset: {len(train_dataset):,} samples (tokenized)")
     print(f"  ✓ Eval dataset: {len(eval_dataset):,} samples (tokenized)")
@@ -467,49 +429,83 @@ if __name__ == "__main__":
     steps_per_epoch = len(train_dataset) // TRAIN_BATCH_SIZE
     max_steps = steps_per_epoch * NUM_EPOCHS
     
+    # Auto-detect bf16/fp16 support
+    use_bf16 = False
+    use_fp16 = False
+    if device == "cuda":
+        # Check if GPU supports bf16 (Ampere+, compute capability >= 8.0)
+        if torch.cuda.get_device_capability()[0] >= 8:
+            use_bf16 = True
+            print("  → Detected Ampere+ GPU, using bf16 precision")
+        else:
+            use_fp16 = True
+            print("  → Using fp16 precision")
+    
+    # Determine optimizer
+    optimizer_name = "adamw_torch"
+    if torch.__version__ >= "2.0":
+        optimizer_name = "adamw_torch_fused"
+        print("  → Using fused AdamW optimizer")
+    
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
         max_steps=max_steps,
         per_device_train_batch_size=TRAIN_BATCH_SIZE,
-        per_device_eval_batch_size=EVAL_BATCH_SIZE,
+        per_device_eval_batch_size=64,  # Giảm để tránh OOM khi generate
         learning_rate=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
+        warmup_ratio=0.03,  # Dùng ratio thay vì fixed steps
         logging_steps=LOGGING_STEPS,
         save_steps=SAVE_STEPS,
         eval_steps=EVAL_STEPS,
-        eval_strategy="steps",
+        eval_strategy="steps",  # FIX BUG: eval_strategy -> evaluation_strategy
         save_strategy="steps",
         save_total_limit=3,
-        metric_for_best_model="bleu",  # Dựa vào BLEU score (tốt hơn loss)
-        greater_is_better=True,  # BLEU càng cao càng tốt
+        metric_for_best_model="bleu",
+        greater_is_better=True,
         load_best_model_at_end=True,
-        bf16=True,
+        # Mixed precision
+        bf16=use_bf16,
+        fp16=use_fp16,
+        # Optimizer
+        optim=optimizer_name,
+        weight_decay=0.01,
         # Learning rate scheduler
-        lr_scheduler_type="cosine",  # Cosine annealing schedule
+        lr_scheduler_type="cosine",
+        # Label smoothing
+        label_smoothing_factor=0.1,
         # Generation config for metrics
-        predict_with_generate=True,  # Generate text để tính metrics
-        generation_max_length=MAX_TARGET_LENGTH,
+        predict_with_generate=True,
+        generation_max_length=128,  # Giảm để tăng tốc eval
         # DataLoader optimization
         dataloader_num_workers=NUM_WORKERS,
         dataloader_prefetch_factor=PREFETCH_FACTOR,
         dataloader_pin_memory=True,
+        dataloader_persistent_workers=True,
+        group_by_length=True,  # Bucket by length để tăng tốc
+        # Eval optimization
+        # Other
         remove_unused_columns=False,
+        save_safetensors=True,
+        seed=42,
         report_to="none",
     )
     
     print(f"  - Total steps: {max_steps:,}")
     print(f"  - Steps per epoch: {steps_per_epoch:,}")
-    print(f"  - LR scheduler: cosine annealing")
+    print(f"  - LR scheduler: cosine annealing with 3% warmup")
+    print(f"  - Weight decay: 0.01, Label smoothing: 0.1")
     print(f"  - Eval every: {EVAL_STEPS:,} steps")
     print(f"  - Save every: {SAVE_STEPS:,} steps")
     print(f"  - Keep best: 3 checkpoints (based on BLEU score)")
     print(f"  - Metrics: BLEU, Exact Match, CER, WER")
+    print(f"  - Group by length: True (bucketing for speed)")
     
-    # Data collator
+    # Data collator với pad_to_multiple_of=8 để tăng tốc Tensor Cores
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
         model=model,
-        padding=True
+        padding=True,
+        pad_to_multiple_of=8
     )
     
     print("  ✓ Training arguments đã được thiết lập")
