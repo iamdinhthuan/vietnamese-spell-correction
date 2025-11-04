@@ -10,13 +10,14 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
-    DataCollatorForSeq2Seq
+    DataCollatorForSeq2Seq,
+    TrainerCallback
 )
 import evaluate
 
-DATA_FILE = "n.csv"  # File dữ liệu chính
+DATA_FILE = "spelling_errors.csv"  # File dữ liệu chính
 TRAIN_VAL_SPLIT = 0.95  # Tỉ lệ train:val = 85:15
-MODEL_NAME = "vinai/bartpho-syllable-base"
+MODEL_NAME = "vinai/bartpho-syllable"
 OUTPUT_DIR = "./bartpho_vsc"
 FINAL_MODEL_DIR = "./bartpho_vsc_model"
 
@@ -42,6 +43,14 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Metrics evaluation settings
 MAX_EVAL_SAMPLES = 1000  # Giới hạn số samples để eval metrics (tránh quá chậm)
+
+# Example sentences for inference after validation
+EXAMPLE_SENTENCES = [
+    "Đây ià cac phưong tiện vi phạm được camera ghi hình.",
+    "Phổ biến nhat ià ioi đỗ không đúng nơi quy dịnh.",
+    "Tôi đang học tap tiéng viét ơ trưòng đai hoc.",
+    "Hom nay troi mua rat to, toi khong the di hoc duoc."
+]
 
 
 print("=" * 80)
@@ -267,6 +276,68 @@ def compute_metrics(eval_preds, tokenizer):
     }
 
 # ============================================================================
+# HÀM INFERENCE CHO EXAMPLE SENTENCES
+# ============================================================================
+
+def run_inference_examples(model, tokenizer, examples, device, num_beams=15):
+    """
+    Chạy inference trên các câu example và log kết quả
+    """
+    model.eval()
+    print("\n" + "=" * 80)
+    print("INFERENCE EXAMPLES")
+    print("=" * 80)
+    
+    for i, text in enumerate(examples, 1):
+        # Tokenize
+        inputs = tokenizer(
+            text,
+            max_length=MAX_INPUT_LENGTH,
+            truncation=True,
+            padding=True,
+            return_tensors="pt"
+        )
+        
+        # Chuyển sang device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        # Generate
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_length=MAX_TARGET_LENGTH,
+                num_beams=num_beams,
+                early_stopping=True,
+                no_repeat_ngram_size=2,
+            )
+        
+        # Decode
+        corrected_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Log
+        print(f"\n[{i}] Input:  {text}")
+        print(f"    Output: {corrected_text}")
+    
+    print("=" * 80 + "\n")
+
+# ============================================================================
+# CALLBACK ĐỂ CHẠY INFERENCE SAU EVAL
+# ============================================================================
+
+class InferenceCallback(TrainerCallback):
+    """Callback để chạy inference examples sau mỗi lần evaluation"""
+    
+    def __init__(self, model, tokenizer, examples, device):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.examples = examples
+        self.device = device
+    
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Chạy sau khi evaluation hoàn tất"""
+        run_inference_examples(self.model, self.tokenizer, self.examples, self.device)
+
+# ============================================================================
 # MAIN TRAINING
 # ============================================================================
 
@@ -458,6 +529,14 @@ if __name__ == "__main__":
     
     training_start_time = time.time()
     
+    # Tạo callback để chạy inference sau eval
+    inference_callback = InferenceCallback(
+        model=model,
+        tokenizer=tokenizer,
+        examples=EXAMPLE_SENTENCES,
+        device=device
+    )
+    
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -466,6 +545,7 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=lambda eval_preds: compute_metrics(eval_preds, tokenizer),
+        callbacks=[inference_callback],
     )
     
     # Resume từ checkpoint nếu có, nếu không thì train từ đầu

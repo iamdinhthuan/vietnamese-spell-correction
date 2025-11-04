@@ -29,6 +29,7 @@ ocr_correction_dataset.csv
 train.csv
 val.csv
 data.csv
+input.txt
 
 # Model checkpoints and weights (large files)
 bartpho_vsc/
